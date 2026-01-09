@@ -1,142 +1,136 @@
 import streamlit as st
 import requests
-import socket
-import os
+import pandas as pd
+import io
 
-st.set_page_config(page_title="API 流程终极诊断器", page_icon="🕵️", layout="wide")
+# --- 页面配置 ---
+st.set_page_config(page_title="小红书AI (V23 最终智能版)", page_icon="🍒", layout="wide")
 
-st.title("🕵️ API 调用流程：全链路体检")
-st.info("此程序不生成文案，专门用于找出报错的根本原因。")
+# 强制官方地址
+BASE_URL = "https://generativelanguage.googleapis.com"
 
-# --- 输入区 ---
-st.markdown("### 1. 准备工作")
-api_key = st.text_input("请输入您的 API Key (AIza 开头)", type="password")
-start_btn = st.button("🚀 开始全链路诊断", type="primary")
-
-if start_btn:
-    st.divider()
-    
-    # ==========================================
-    # 环节 A: 环境与网络自检
-    # ==========================================
-    st.header("环节 A: 环境与网络自检")
-    
-    # 1. 查环境
+# --- 核心：自动挑选“会说话”的模型 ---
+def get_best_model(api_key):
+    # 1. 问 Google：我有那些模型？
+    url = f"{BASE_URL}/v1beta/models?key={api_key}"
     try:
-        # Streamlit Cloud 并没有固定的 IP，但我们可以通过 hostname 猜测
-        hostname = socket.gethostname()
-        st.write(f"🔹 **当前运行环境主机名:** `{hostname}`")
-        
-        if "localhost" in hostname or "0.0.0.0" in os.environ.get("HOST", ""):
-            st.warning("⚠️ 警告: 看起来像是在本地环境。如果您没开 VPN，下面的网络测试可能会失败。")
-        else:
-            st.success("✅ 检测到云端环境 (Streamlit Cloud)，网络应当畅通。")
-    except:
-        st.write("🔹 环境检测跳过")
-
-    # 2. 查网络 (Ping Google)
-    st.write("🔹 **正在尝试连接 Google 核心服务...**")
-    try:
-        # 尝试连接 Google 的发现服务，这是一个极轻量的请求
-        # 注意：这里不带 Key，单纯测网络通不通
-        test_url = "https://generativelanguage.googleapis.com"
-        resp = requests.get(test_url, timeout=5)
-        
-        if resp.status_code == 404: 
-            # 404 是正常的，因为我们没指定具体页面，但说明服务器由 Google 回复了
-            st.success(f"✅ 网络通畅！成功连接到 {test_url}")
-        else:
-            st.info(f"✅ 网络连通 (状态码 {resp.status_code})")
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return None, f"获取模型失败: {resp.status_code}"
             
-    except Exception as e:
-        st.error(f"❌ 网络极其异常！无法连接 Google。")
-        st.code(str(e))
-        st.stop() # 网络不通，后面不用测了
-
-    # ==========================================
-    # 环节 B: 钥匙 (Key) 权限验证
-    # ==========================================
-    st.divider()
-    st.header("环节 B: 钥匙 (Key) 权限验证")
-    
-    if not api_key:
-        st.error("❌ 您没有输入 Key，无法测试此环节。")
-        st.stop()
-
-    st.write("🔹 **正在询问 Google: '这把钥匙能开哪些门？'**")
-    
-    # 我们调用 listModels 接口。这个接口最能反映 Key 的真实权限。
-    # 它可以区分出：是 Key 坏了？还是 Key 没权限？还是 Key 类型不对？
-    models_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-    
-    try:
-        resp = requests.get(models_url, timeout=10)
+        data = resp.json()
+        models = data.get('models', [])
         
-        # --- 诊断逻辑核心 ---
-        if resp.status_code == 200:
-            st.success("✅ **完美！Key 有效且权限正确！**")
-            data = resp.json()
-            models = [m['name'].replace('models/', '') for m in data.get('models', [])]
-            st.write(f"📜 Google 返回了 {len(models)} 个可用模型：")
-            st.code(models)
+        # 2. 筛选：只找支持 'generateContent' 的模型
+        chat_models = []
+        for m in models:
+            if 'generateContent' in m.get('supportedGenerationMethods', []):
+                name = m['name'].replace('models/', '')
+                chat_models.append(name)
+        
+        if not chat_models:
+            return None, "您的 Key 有效，但没找到支持对话的模型。"
             
-            # 检查是否有 flash
-            if "gemini-1.5-flash" in models:
-                st.success("🎉 确认：您的 Key 支持 `gemini-1.5-flash`！")
-            else:
-                st.warning("⚠️ 注意：您的 Key 有效，但列表里没有 `gemini-1.5-flash`。可能需要用 `gemini-pro`。")
-
-        elif resp.status_code == 400:
-            st.error("❌ **Key 格式错误 (HTTP 400)**")
-            st.write("原因：Key 可能复制错了，或者包含空格。")
-            st.write(f"Google 反馈: `{resp.text}`")
-
-        elif resp.status_code == 403:
-            st.error("❌ **权限不足 (HTTP 403)**")
-            st.write("原因：Key 是对的，但被 Google 拦截了。")
-            st.write("可能性 1：您的 Google Cloud 项目没有开启 'Generative Language API'。")
-            st.write("可能性 2：这把 Key 设置了 IP 限制。")
-            st.write(f"Google 反馈: `{resp.text}`")
-
-        elif resp.status_code == 404:
-            st.error("❌ **服务未找到 (HTTP 404)**")
-            st.write("这是最常见的问题！")
-            st.write("🔴 **极大概率原因：您拿的是 Vertex AI (企业版) 的 Key，却用在了 AI Studio (个人版) 的代码里。**")
-            st.write("Vertex AI 的 Key 无法识别 `generativelanguage.googleapis.com` 这个地址。")
-            st.write("👉 解决办法：请务必去 'REd book' 项目里，找那个带有 ✅ 的 Key。")
-
-        else:
-            st.error(f"❌ 未知错误 (HTTP {resp.status_code})")
-            st.code(resp.text)
+        # 3. 优选：优先找 flash 或 pro，找不到就用第一个
+        best_model = chat_models[0] # 默认第一个
+        for m in chat_models:
+            if "flash" in m: 
+                best_model = m; break
+            elif "pro" in m and "vision" not in m: # 避开纯视觉模型
+                best_model = m
+                
+        return best_model, None
 
     except Exception as e:
-        st.error(f"验证 Key 时发生异常: {e}")
+        return None, f"网络错误: {e}"
 
-    # ==========================================
-    # 环节 C: 最终实战模拟
-    # ==========================================
-    if resp.status_code == 200: # 只有 Key 验证通过才测这一步
-        st.divider()
-        st.header("环节 C: 实战模拟生成")
-        st.write("🔹 **尝试发送 'Hello' 给 AI...**")
+# --- AI 调用 ---
+def call_gemini(prompt, api_key, model_name):
+    url = f"{BASE_URL}/v1beta/models/{model_name}:generateContent?key={api_key}"
+    headers = {'Content-Type': 'application/json'}
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        if response.status_code == 200:
+            return True, response.json()['candidates'][0]['content']['parts'][0]['text']
+        else:
+            return False, f"API报错: {response.text}"
+    except Exception as e:
+        return False, f"网络错误: {e}"
+
+# --- 主界面 ---
+st.title("🍒 小红书 AI 选题中台")
+st.caption("🚀 V23.0 智能过滤版 | 已解决 embedding 模型报错问题")
+
+# 初始化 Session State
+if 'working_model' not in st.session_state:
+    st.session_state.working_model = None
+
+with st.sidebar:
+    st.header("🔑 设置")
+    api_key = st.text_input("输入 API Key", type="password")
+    
+    # 自动初始化模型
+    if api_key and not st.session_state.working_model:
+        model, err = get_best_model(api_key)
+        if model:
+            st.session_state.working_model = model
+            st.success(f"✅ 已锁定模型: {model}")
+        else:
+            if err: st.error(err)
+    
+    # 如果已经锁定了模型，显示出来
+    if st.session_state.working_model:
+        st.info(f"当前使用: {st.session_state.working_model}")
+
+    uploaded_file = st.file_uploader("📂 上传 Excel", type=['xlsx', 'csv'])
+
+# 主工作区
+col1, col2 = st.columns([1, 2])
+with col1:
+    txt = st.text_area("文案输入", height=300)
+    
+    can_run = api_key and st.session_state.working_model
+    
+    if st.button("✨ 开始执行", type="primary", use_container_width=True, disabled=not can_run):
+        if not txt and not uploaded_file: st.warning("请输入内容"); st.stop()
         
-        # 强制使用刚才获取到的第一个模型，确保不报 404
-        target_model = models[0] if models else "gemini-1.5-flash"
-        st.info(f"使用模型: {target_model}")
+        tasks = []
+        if txt: tasks.extend([t.strip() for t in txt.split('\n\n') if len(t.strip())>5])
+        if uploaded_file:
+            try:
+                df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+                tasks.extend(df.iloc[:,0].dropna().astype(str).tolist())
+            except: pass
+            
+        bar = st.progress(0); log = st.empty(); res = []
+        model_used = st.session_state.working_model
         
-        gen_url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
-        payload = {"contents": [{"parts": [{"text": "Hello"}]}]}
-        
-        try:
-            r = requests.post(gen_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
-            if r.status_code == 200:
-                st.balloons()
-                st.success(f"🎉🎉🎉 **测试通过！AI 回复了：**")
-                st.write(r.json()['candidates'][0]['content']['parts'][0]['text'])
-                st.markdown("---")
-                st.markdown("### ✅ 结论：现在的环境和 Key 都是 100% 没问题的！")
-                st.markdown("您可以放心地把代码改回业务版了。")
-            else:
-                st.error(f"生成失败: {r.text}")
-        except Exception as e:
-            st.error(f"实战模拟出错: {e}")
+        for i, t in enumerate(tasks):
+            log.text(f"处理第 {i+1} 条...")
+            
+            # 1. 分析
+            p1 = f"分析文案:'{t[:500]}'.提取:原标题|||人设|||选题|||公式"
+            ok, r1 = call_gemini(p1, api_key, model_used)
+            item = {"原文": t[:15], "结果": ""}
+            
+            if ok and "|||" in r1:
+                parts = r1.split("|||")
+                if len(parts)>=4:
+                    # 2. 生成
+                    p2 = f"我是{parts[1]},写5个关于{parts[2]}的标题"
+                    ok2, r2 = call_gemini(p2, api_key, model_used)
+                    item["结果"] = r2 if ok2 else r2
+                else: item["结果"] = r1
+            else: item["结果"] = r1
+            
+            res.append(item)
+            bar.progress((i+1)/len(tasks))
+            
+        st.session_state.results = res
+        log.success("完成！")
+
+with col2:
+    if 'results' in st.session_state and st.session_state.results:
+        st.dataframe(pd.DataFrame(st.session_state.results), use_container_width=True)
