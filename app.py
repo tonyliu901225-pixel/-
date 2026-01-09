@@ -10,18 +10,18 @@ import re
 # 1. 基础配置
 # ==========================================
 st.set_page_config(
-    page_title="小红书 AI 选题中台 (V29 极简高阶版)",
+    page_title="小红书 AI 选题中台 (V30 极简标签版)",
     page_icon="🍒",
     layout="wide"
 )
 
 BASE_URL = "https://generativelanguage.googleapis.com"
 
-# 默认标题风格
+# 默认风格 (强调发散性)
 DEFAULT_STYLE = """
-1. 20字以内。
-2. 分5行，无序号。
-3. 口语化，多用emoji，职场商务风。
+1. 5个标题要求风格迥异 (如: 悬念感、强痛点、高情绪、干货感)。
+2. 拒绝死板，拒绝翻译腔。
+3. 分5行展示，无序号。
 """
 
 # ==========================================
@@ -29,17 +29,20 @@ DEFAULT_STYLE = """
 # ==========================================
 
 def clean_text(text):
-    """移除 AI 返回中常见的序号、前缀标签"""
+    """超级清洗：移除所有序号、前缀、标点，只留核心词"""
     if not text: return ""
-    # 匹配模式：数字+.+空格 或 类似 "1. 原标题：" 的前缀
-    pattern = r'^(\d+[\.\、\s]*|原标题[:：\s]*|人设[:：\s]*|主选题[:：\s]*|细分角度[:：\s]*|分析思路[:：\s]*|爆款公式[:：\s]*|主选题方向[:：\s]*)'
-    # 先处理 markdown 粗体
-    text = text.replace('**', '')
-    # 循环清理多行前缀
+    # 移除常见的 Label 前缀 (如 "人设：", "1. ")
+    pattern = r'^(\d+[\.\、\s]*|原标题[:：\s]*|人设[:：\s]*|细分选题[:：\s]*|爆款元素[:：\s]*|标题公式[:：\s]*|主选题[:：\s]*)'
+    
     lines = []
     for line in text.strip().split('\n'):
-        line = re.sub(pattern, '', line.strip())
-        if line: lines.append(line)
+        # 去掉 Markdown 粗体
+        cleaned = line.replace('**', '').strip()
+        # 去掉前缀
+        cleaned = re.sub(pattern, '', cleaned)
+        # 如果是"爆款元素"这种，去掉句号
+        cleaned = cleaned.rstrip('。')
+        if cleaned: lines.append(cleaned)
     return "\n".join(lines)
 
 def get_best_model(api_key):
@@ -84,13 +87,13 @@ with st.sidebar:
         model, err = get_best_model(api_key)
         if model: st.session_state.working_model = model; st.success(f"已锁定: {model}")
     
-    st.subheader("🎨 生成风格")
-    user_style = st.text_area("提示词预设", value=DEFAULT_STYLE, height=120)
+    st.subheader("🎨 发散度设置")
+    user_style = st.text_area("生成要求", value=DEFAULT_STYLE, height=120)
     
     uploaded_file = st.file_uploader("📂 素材上传", type=['xlsx', 'csv', 'png', 'jpg', 'jpeg'])
 
 st.title("🍒 小红书 AI 选题中台")
-st.caption("🚀 V29.0 极简高阶版 | 已自动剔除标签前缀 | 支持图片识别")
+st.caption("🚀 V30.0 极简标签版 | 仿参考图格式 | 标题创意发散")
 
 col_in, col_out = st.columns([1, 3])
 
@@ -119,28 +122,46 @@ with col_in:
         for i, task in enumerate(tasks):
             status.markdown(f"🔄 **分析中 {i+1}/{len(tasks)}**")
             
-            # --- 阶段 1：深度拆解 (强制要求无标签输出) ---
+            # --- 阶段 1：标签化拆解 (核心修改) ---
+            # 移除了分析思路，增加了"爆款元素"和"标题公式"，要求极简输出
             p_analyze = f"""
             分析素材: "{task['content'] if task['type']=='text' else '图片'}"
-            请提取以下6项，严格用 '|||' 隔开。注意：不要输出'1.'或'原标题:'这类前缀标签，直接给内容：
-            原标题 ||| 人设 ||| 主选题 ||| 细分角度 ||| 标题公式 ||| 分析思路
+            请提取以下5项，严格用 '|||' 隔开。
+            ⚠️ 重点要求：输出必须【简明扼要】，像打标签一样，不要长句子！
+            
+            1. 原标题 (仅保留核心意思，10字内)
+            2. 人设 (如: 销售老徐)
+            3. 细分选题 (如: 订阅式送礼策略)
+            4. 爆款元素 (如: 反常识+痛点+焦虑)
+            5. 标题公式 (如: 痛点+反常识+方案)
             """
             
             ok1, res1 = call_gemini(p_analyze, api_key, st.session_state.working_model, task['content'] if task['type']=='image' else None)
             
             if ok1 and "|||" in res1:
                 pts = res1.split("|||")
-                if len(pts) >= 6:
+                if len(pts) >= 5:
                     row = {
                         "来源": task['name'],
                         "原标题": clean_text(pts[0]),
                         "人设": clean_text(pts[1]),
-                        "主选题": clean_text(pts[2]),
-                        "细分角度": clean_text(pts[3]),
-                        "分析思路": clean_text(pts[5]),
+                        "细分选题": clean_text(pts[2]),
+                        "爆款元素": clean_text(pts[3]),
+                        "标题公式": clean_text(pts[4]),
                     }
-                    # --- 阶段 2：生成 ---
-                    p_gen = f"基于人设【{row['人设']}】和细分角度【{row['细分角度']}】，参考思路【{row['分析思路']}】。\n生成标题要求：\n{user_style}"
+                    # --- 阶段 2：发散性生成 ---
+                    # 重点修改：要求"发散"，不让 AI 死板
+                    p_gen = f"""
+                    你是一个顶尖的小红书爆款标题专家。
+                    基于【{row['细分选题']}】，利用元素【{row['爆款元素']}】。
+                    
+                    👉 请大开脑洞，创作 5 个标题。
+                    ⚠️ 核心要求：
+                    1. **拒绝同质化**：5个标题必须完全不同（有的设置悬念，有的直接给干货，有的引发焦虑）。
+                    2. **发散思维**：不要只盯着一个点，尝试不同切入。
+                    3. 格式：分5行，无序号。
+                    {user_style}
+                    """
                     ok2, res2 = call_gemini(p_gen, api_key, st.session_state.working_model)
                     row["AI 爆款标题"] = clean_text(res2) if ok2 else "生成失败"
                     new_res.append(row)
@@ -154,12 +175,15 @@ with col_out:
     if st.session_state.results:
         df_res = pd.DataFrame(st.session_state.results)
         
+        # 网页显示配置 (对标参考图)
         st.dataframe(
             df_res,
             column_config={
-                "AI 爆款标题": st.column_config.TextColumn("AI 爆款标题 (5行)", width="large"),
-                "分析思路": st.column_config.TextColumn("分析思路", width="medium"),
-                "细分角度": st.column_config.TextColumn("细分切入点", width="medium"),
+                "AI 爆款标题": st.column_config.TextColumn("AI 爆款标题 (5个发散方向)", width="large"),
+                "细分选题": st.column_config.TextColumn("细分选题", width="medium"),
+                "爆款元素": st.column_config.TextColumn("爆款元素", width="small"),
+                "标题公式": st.column_config.TextColumn("标题公式", width="small"),
+                "人设": st.column_config.TextColumn("人设", width="small"),
             },
             use_container_width=True, height=600
         )
@@ -169,8 +193,14 @@ with col_out:
             df_res.to_excel(wr, index=False, sheet_name='选题库')
             bk = wr.book; ws = wr.sheets['选题库']
             fmt = bk.add_format({'text_wrap': True, 'valign': 'top', 'border': 1})
-            widths = [12, 25, 12, 15, 25, 30, 50]
-            for i, w in enumerate(widths): ws.set_column(i, i, w, fmt)
+            # 调整列宽适配 Excel
+            ws.set_column('A:A', 10, fmt) # 来源
+            ws.set_column('B:B', 20, fmt) # 原标题
+            ws.set_column('C:C', 10, fmt) # 人设
+            ws.set_column('D:D', 20, fmt) # 细分选题
+            ws.set_column('E:E', 25, fmt) # 爆款元素
+            ws.set_column('F:F', 25, fmt) # 标题公式
+            ws.set_column('G:G', 50, fmt) # 生成标题
             
-        st.download_button("📥 下载选题库 Excel", out.getvalue(), f"XHS_选题_{int(time.time())}.xlsx", use_container_width=True)
+        st.download_button("📥 下载极简选题库 Excel", out.getvalue(), f"XHS_极简_{int(time.time())}.xlsx", use_container_width=True)
         if st.button("🗑️ 清空结果"): st.session_state.results = []; st.rerun()
