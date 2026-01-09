@@ -4,179 +4,125 @@ import pandas as pd
 import io
 import time
 
-# --- 1. 页面基础配置 ---
+# --- 1. 页面配置 ---
 st.set_page_config(
-    page_title="小红书AI中台 (V13 官方纯净版)",
+    page_title="小红书AI中台 (V14 自动巡航版)",
     page_icon="🍒",
     layout="wide"
 )
 
-# --- 2. 核心 AI 通信函数 (强制官方线路) ---
-def call_gemini_official(prompt, api_key):
-    # ⚠️ 强制使用 Google 官方地址，不再允许修改，确保 100% 兼容性
-    # Streamlit 云端服务器在美国，连接此地址畅通无阻
+# --- 2. 核心：智能模型回退机制 ---
+def call_gemini_smart(prompt, api_key):
+    # 定义尝试顺序：新模型 -> 老模型
+    # 这样可以确保如果新模型 404，会自动降级使用老模型
+    candidate_models = [
+        "gemini-1.5-flash", 
+        "gemini-1.5-pro", 
+        "gemini-pro", 
+        "gemini-1.0-pro"
+    ]
+    
+    # 强制官方地址 (Streamlit Cloud 专用)
     base_url = "https://generativelanguage.googleapis.com"
-    model = "gemini-1.5-flash"
     
-    url = f"{base_url}/v1beta/models/{model}:generateContent?key={api_key}"
-    headers = {'Content-Type': 'application/json'}
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    last_error = ""
     
-    try:
-        # 发送请求
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
+    # 循环尝试每个模型
+    for model in candidate_models:
+        url = f"{base_url}/v1beta/models/{model}:generateContent?key={api_key}"
+        headers = {'Content-Type': 'application/json'}
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
         
-        # 错误处理
-        if response.status_code != 200:
-            return {"success": False, "error": f"HTTP {response.status_code}: {response.text}"}
-        
-        # 解析结果
-        result = response.json()
-        if 'candidates' in result and result['candidates']:
-            return {"success": True, "text": result['candidates'][0]['content']['parts'][0]['text']}
-        else:
-            return {"success": False, "error": "AI 返回了空内容 (可能是安全拦截)"}
+        try:
+            # 发起请求
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
             
-    except Exception as e:
-        return {"success": False, "error": f"网络连接错误: {str(e)}"}
+            # 如果成功 (200 OK)
+            if response.status_code == 200:
+                result = response.json()
+                if 'candidates' in result and result['candidates']:
+                    return {
+                        "success": True, 
+                        "text": result['candidates'][0]['content']['parts'][0]['text'],
+                        "used_model": model # 告诉用户最终用的是哪个模型
+                    }
+            
+            # 如果是 404 (模型未找到)，记录错误并继续尝试下一个模型
+            if response.status_code == 404:
+                last_error = f"模型 {model} 报错 404，正在尝试下一个..."
+                continue
+                
+            # 如果是其他错误 (如 400 Key 错误)，直接停止，不再尝试
+            return {"success": False, "error": f"HTTP {response.status_code}: {response.text}"}
+            
+        except Exception as e:
+            return {"success": False, "error": f"网络错误: {str(e)}"}
+            
+    # 如果所有模型都试完了还在报错
+    return {"success": False, "error": f"所有模型均尝试失败。最后一次报错: {last_error}"}
 
-# --- 3. 侧边栏配置 ---
+# --- 3. 侧边栏 ---
 with st.sidebar:
     st.header("⚙️ 系统设置")
-    api_key = st.text_input("在此输入 API Key", type="password")
+    api_key = st.text_input("输入 API Key", type="password")
     
-    st.success("✅ 网络状态：已直连 Google 官方")
-    st.info("☁️ 此版本专为 Streamlit Cloud 设计，无需任何代理。")
-    
-    uploaded_file = st.file_uploader("📂 批量上传 Excel", type=['xlsx', 'csv'])
+    st.info("🤖 V14 逻辑：自动检测可用模型，解决 404 问题。")
+    uploaded_file = st.file_uploader("📂 上传 Excel", type=['xlsx', 'csv'])
 
-# --- 4. 主工作台 ---
+# --- 4. 主界面 ---
 st.title("🍒 小红书 AI 选题中台")
-st.markdown("##### 🚀 V13.0 官方纯净版 | 极速 | 稳定")
+st.caption("🚀 V14.0 自动巡航版 | 智能容错")
 
-# 初始化数据容器
-if 'results' not in st.session_state:
-    st.session_state.results = []
+if 'results' not in st.session_state: st.session_state.results = []
 
-# 布局
-col_input, col_output = st.columns([1, 2])
+col1, col2 = st.columns([1, 2])
 
-with col_input:
-    input_text = st.text_area("✍️ 在此粘贴文案 (支持多篇，空行分隔)", height=300)
-    
-    run_btn = st.button("✨ 立即执行 AI 分析", type="primary", use_container_width=True)
-
-    if run_btn:
-        if not api_key:
-            st.error("❌ 请先在左侧填入 API Key")
-            st.stop()
+with col1:
+    txt_input = st.text_area("在此粘贴文案", height=300)
+    if st.button("✨ 开始执行", type="primary", use_container_width=True):
+        if not api_key: st.error("请填入 Key"); st.stop()
         
-        # 准备任务列表
         tasks = []
-        if input_text:
-            tasks.extend([t.strip() for t in input_text.split('\n\n') if len(t.strip()) > 5])
-        
+        if txt_input: tasks.extend([t.strip() for t in txt_input.split('\n\n') if len(t.strip()) > 5])
         if uploaded_file:
             try:
-                if uploaded_file.name.endswith('.csv'):
-                    df = pd.read_csv(uploaded_file)
-                else:
-                    df = pd.read_excel(uploaded_file)
+                df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
                 tasks.extend(df.iloc[:, 0].dropna().astype(str).tolist())
-            except:
-                st.warning("文件读取失败，请检查格式")
+            except: pass
+            
+        if not tasks: st.warning("请输入内容"); st.stop()
 
-        if not tasks:
-            st.warning("⚠️ 没有检测到有效文案")
-            st.stop()
-
-        # 开始处理
-        progress_bar = st.progress(0)
-        status_box = st.empty()
-        temp_results = []
-
+        prog = st.progress(0); status = st.empty(); new_res = []
+        
         for i, text in enumerate(tasks):
-            status_box.markdown(f"🔄 **正在处理第 {i+1}/{len(tasks)} 条...**")
+            status.markdown(f"🔄 **正在处理第 {i+1}/{len(tasks)} 条...**")
             
-            # 步骤 1: 深度拆解
-            prompt_1 = f"""分析文案:"{text[:800]}".提取4项内容,严格用|||隔开:
-            1.原标题
-            2.人设(判断是:销售老徐/总助Fiona/其他)
-            3.核心选题
-            4.爆款公式
-            如果不确定，请填“未知”"""
+            # 1. 分析
+            p1 = f"""分析文案:"{text[:500]}...".提取4项用|||隔开: 原标题|||人设(销售-老徐/总助-Fiona)|||细分选题|||标题公式|||爆款元素"""
+            r1 = call_gemini_smart(p1, api_key)
             
-            res_1 = call_gemini_official(prompt_1, api_key)
+            item = {"原文": text[:20]+"...", "状态": "✅ 成功", "结果": "", "使用模型": r1.get('used_model', '未知')}
             
-            # 构建结果对象
-            data_row = {
-                "原文片段": text[:20] + "...",
-                "状态": "✅ 完成",
-                "AI反馈": ""
-            }
-
-            if res_1['success']:
-                raw = res_1['text'].strip()
-                if "|||" in raw:
-                    parts = raw.split('|||')
+            if r1['success']:
+                if "|||" in r1['text']:
+                    parts = r1['text'].replace('```','').strip().split('|||')
                     if len(parts) >= 4:
-                        persona = parts[1].strip()
-                        topic = parts[2].strip()
-                        formula = parts[3].strip()
-                        
-                        data_row["人设"] = persona
-                        data_row["选题"] = topic
-                        data_row["公式"] = formula
-                        
-                        # 步骤 2: 生成标题
-                        prompt_2 = f"""你现在是{persona}，针对选题"{topic}"，利用公式"{formula}"。
-                        请写 5 个极具吸引力的小红书标题。
-                        要求：口语化、带情绪、无序号、每行一个。"""
-                        
-                        res_2 = call_gemini_official(prompt_2, api_key)
-                        if res_2['success']:
-                            data_row["生成的爆款标题"] = res_2['text']
-                        else:
-                            data_row["生成的爆款标题"] = "标题生成失败"
-                    else:
-                        data_row["状态"] = "⚠️ 格式解析失败"
-                        data_row["AI反馈"] = raw
-                else:
-                     data_row["状态"] = "⚠️ 格式错误"
-                     data_row["AI反馈"] = raw
-            else:
-                data_row["状态"] = "❌ 请求失败"
-                data_row["AI反馈"] = res_1['error']
+                        # 2. 写标题
+                        p2 = f"""你叫{parts[1]},选题"{parts[2]}".写5个标题."""
+                        r2 = call_gemini_smart(p2, api_key)
+                        item["结果"] = r2['text'] if r2['success'] else r2['error']
+                    else: item["状态"] = "格式错"; item["结果"] = r1['text']
+                else: item["状态"] = "格式错"; item["结果"] = r1['text']
+            else: item["状态"] = "❌ 失败"; item["结果"] = r1['error']
+            
+            new_res.append(item)
+            prog.progress((i+1)/len(tasks))
+            
+        st.session_state.results = new_res + st.session_state.results
+        status.success(f"完成！最终使用的模型是: {new_res[0].get('使用模型')}")
 
-            temp_results.append(data_row)
-            progress_bar.progress((i + 1) / len(tasks))
-
-        # 更新结果
-        st.session_state.results = temp_results + st.session_state.results
-        status_box.success(f"🎉 全部完成！共处理 {len(tasks)} 条")
-
-with col_output:
+with col2:
     if st.session_state.results:
-        st.markdown(f"### 📊 结果列表 ({len(st.session_state.results)})")
-        
-        # 展示表格
-        df_show = pd.DataFrame(st.session_state.results)
-        st.dataframe(df_show, use_container_width=True)
-        
-        # 导出按钮
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-            df_show.to_excel(writer, index=False)
-        
-        st.download_button(
-            label="📥 下载 Excel 报表",
-            data=buffer.getvalue(),
-            file_name=f"小红书AI分析_{int(time.time())}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        
-        if st.button("🗑️ 清空所有记录"):
-            st.session_state.results = []
-            st.rerun()
-    else:
-        st.info("👈 请在左侧输入内容并开始")
+        df = pd.DataFrame(st.session_state.results)
+        st.dataframe(df, use_container_width=True)
+        if st.button("清空"): st.session_state.results = []; st.rerun()
